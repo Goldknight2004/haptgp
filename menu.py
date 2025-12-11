@@ -6,8 +6,7 @@ import sys
 # Importation de la nouvelle librairie cst816
 import cst816 
 
-# --- CONSTANTES DE GESTE NUMÉRIQUES (Vérifiez si elles correspondent à cst816) ---
-# Ces valeurs sont les plus courantes pour le CST816/820.
+# --- CONSTANTES DE GESTE NUMÉRIQUES ---
 GESTURE_NONE = 0
 SWIPE_UP = 1
 SWIPE_DOWN = 2
@@ -17,11 +16,12 @@ SWIPE_RIGHT = 4
 # --- VARIABLES GLOBALES ---
 touch = None 
 current_screen = "HOME"
-# Variables d'état
+# Variables d'état pour la machine à états et le cooldown
 _touch_is_active = False # True si le doigt est en contact
+last_update_time = time.monotonic() # Pour le cooldown
+COOLDOWN_TIME = 0.4 # Temps minimum entre deux événements tactiles
 
-
-# Définition des états possibles de l'écran
+# Définition des états possibles de l'écran (Navigation en Croix)
 MENU_SCREENS = {
     "HOME": "Heure Actuelle",
     "UP": "Temperature",
@@ -32,7 +32,7 @@ MENU_SCREENS = {
 
 # --- CONFIGURATION DU MATÉRIEL CST816 ---
 try:
-    # Initialisation I2C standard (utilise le bus I2C par défaut du Raspberry Pi)
+    # Initialisation I2C standard
     i2c = board.I2C() 
     
     # Initialisation du contrôleur CST816
@@ -44,7 +44,6 @@ try:
     else:
         print("CST816 initialise, mais 'who_am_i' ne correspond pas (adresse I2C?).")
         
-
 except Exception as e:
     print(f"Erreur lors de l'initialisation du CST816: {e}. Le tactile sera desactive.")
     touch = None
@@ -52,78 +51,79 @@ except Exception as e:
 
 def handle_gesture(gesture_id):
     """
-    Met à jour l'état de l'écran avec les règles :
-    1. L'écran suit le doigt
-    2. Toutes les transitions doivent repasser par 'HOME'.
+    Met à jour l'état de l'écran (current_screen) selon la logique de navigation en croix.
     """
     global current_screen
     
     new_screen = current_screen
     
-    # 1. GESTION DES SWIPES VERTICAUX 
-    if gesture_id == SWIPE_UP:
-        if current_screen == "HOME":
+    # 1. GESTION DES TRANSITIONS DEPUIS L'ÉCRAN HOME (Centre de la croix)
+    if current_screen == "HOME":
+        if gesture_id == SWIPE_UP:
             new_screen = "UP"
-        elif current_screen == "DOWN":
-            new_screen = "HOME"
-            
-    elif gesture_id == SWIPE_DOWN:
-        if current_screen == "HOME":
+        elif gesture_id == SWIPE_DOWN:
             new_screen = "DOWN"
-        elif current_screen == "UP":
-            new_screen = "HOME"
-
-    # 2. GESTION DES SWIPES HORIZONTAUX 
-    elif gesture_id == SWIPE_LEFT: 
-        if current_screen == "HOME":
-            new_screen = "RIGHT"
-        elif current_screen == "LEFT":
-            new_screen = "HOME"
-            
-    elif gesture_id == SWIPE_RIGHT:
-        if current_screen == "HOME":
+        elif gesture_id == SWIPE_LEFT: 
             new_screen = "LEFT"
-        elif current_screen == "RIGHT":
+        elif gesture_id == SWIPE_RIGHT:
+            new_screen = "RIGHT"
+    
+    # 2. GESTION DES RETOURS À HOME (Depuis les branches de la croix)
+    elif current_screen in ["UP", "DOWN", "LEFT", "RIGHT"]:
+        # N'importe quel SWIPE retourne à HOME
+        if gesture_id != GESTURE_NONE: 
             new_screen = "HOME"
             
     # 3. MISE À JOUR FINALE
     if new_screen != current_screen:
         current_screen = new_screen
-        buzzer.play_switch()
-        print(f"Changement d'écran vers: {current_screen}")
+        try:
+            buzzer.play_switch() 
+        except NameError:
+            pass
         
+        print(f"Changement d'écran vers: {current_screen}")
+
+
 def check_and_update_menu():
     """ 
-    Gère le capteur en liant l'activité tactile (Touch Up) au geste.
-    Implémente un Cooldown strict pour stopper la boucle infinie du gesture_id persistant.
+    Gère le capteur en utilisant la méthode stable du "Touch Up" et le cooldown.
+    Ceci remplace la fonction handle_touch_and_update_state précédente.
     """
-    global touch, _touch_is_active
+    global touch, _touch_is_active, last_update_time
     
     if touch is None:
         return     
-    # --- 2. Lecture des Registres CST816 ---
+    
+    temps_actuel = time.monotonic()
+    
+    # 1. Lecture des Registres CST816
+    # NOTE: Cette ligne est cruciale et doit être lue à chaque itération du main loop.
     gesture_id = touch.get_gesture() 
     is_pressed = touch.get_touch() # True tant que le doigt est là
-    
-    
+
     if is_pressed:
         # Le doigt est sur l'écran (Touch Down ou Touch Move)
+        # On active le flag d'état
         _touch_is_active = True
+        
     elif not is_pressed and _touch_is_active:
-        # Le doigt vient d'être retiré (Touch Up)
+        # --- 2. GESTION DU TOUCH UP (Le doigt vient d'être retiré) ---
         
-        # ... (Gestion du cooldown)
-        
-        # On vérifie si un SWIPE a été enregistré au moment du Touch Up
-        if gesture_id != GESTURE_NONE:
-            
-            # Geste valide détecté. On le traite.
-            handle_gesture(gesture_id)
-            
-        else:
-            # Pas de SWIPE (gesture_id=0), c'est un TAP.
-            # 🛑 SUPPRIMEZ la ligne suivante :
-            buzzer.play_click() 
-            
-        # Un événement (SWIPE ou TAP) a été traité. On active le cooldown.
+        # Le doigt a été retiré, on réinitialise l'état
         _touch_is_active = False 
+        print(f"DEBUG: Touch UP détecté. Geste lu (ID): {gesture_id}")
+        # C'est la ligne la plus importante pour briser la boucle:
+        # On ne traite le geste que si le COOLDOWN est écoulé.
+        if (temps_actuel - last_update_time) > COOLDOWN_TIME:
+            
+            # On vérifie si un SWIPE a été enregistré au moment du Touch Up
+            if gesture_id != GESTURE_NONE:
+                
+                # Geste valide détecté. On le traite.
+                handle_gesture(gesture_id)
+                
+                # Réinitialiser le temps pour le cooldown (empêche la prochaine lecture immédiate)
+                last_update_time = temps_actuel
+        
+    # Si le doigt n'est pas pressé ET que _touch_is_active est False: on ne fait rien.
